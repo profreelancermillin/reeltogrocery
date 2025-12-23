@@ -1,23 +1,24 @@
 import streamlit as st
 import yt_dlp
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 import os
 import time
 
 # 1. Setup Page
 st.set_page_config(page_title="ReelToGrocery", layout="centered")
 
-# 2. Setup Gemini
-# We use st.secrets so your key isn't public on GitHub
+# 2. Setup Gemini (New SDK)
 if "GEMINI_API_KEY" in st.secrets:
-    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+    client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
 else:
-    st.error("Wait! You need to put your API Key in Streamlit Secrets.")
+    st.error("Missing GEMINI_API_KEY in Streamlit Secrets.")
     st.stop()
 
 def download_audio(video_url):
-    """Downloads audio with anti-bot headers."""
+    """Downloads audio with Anti-Bot protections."""
     output_filename = "temp_audio"
+    # Clean up old files
     if os.path.exists(f"{output_filename}.mp3"):
         os.remove(f"{output_filename}.mp3")
         
@@ -30,76 +31,73 @@ def download_audio(video_url):
                 'preferredcodec': 'mp3',
                 'preferredquality': '192',
             }],
-            # --- NEW: ANTI-BOT HEADERS ---
-            'quiet': False, # Let us see errors in logs
+            # ANTI-BOT SETTINGS
+            'quiet': False,
             'no_warnings': False,
+            'nocheckcertificate': True,
+            # Impersonate a real browser
             'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'referer': 'https://www.google.com/',
         }
-        
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([video_url])
         return f"{output_filename}.mp3"
-        
     except Exception as e:
-        # --- NEW: PRINT THE REAL ERROR ---
-        st.error(f"Detailed Error: {e}") 
+        st.error(f"Download Error: {e}")
         return None
 
 def analyze_with_gemini(audio_path):
     try:
-        # Upload audio to Gemini
-        video_file = genai.upload_file(path=audio_path)
+        # Upload file (New SDK Syntax)
+        file_upload = client.files.upload(path=audio_path)
         
         # Wait for processing
-        while video_file.state.name == "PROCESSING":
+        while file_upload.state.name == "PROCESSING":
             time.sleep(1)
-            video_file = genai.get_file(video_file.name)
+            file_upload = client.files.get(name=file_upload.name)
 
-        # The Prompt
-        model = genai.GenerativeModel(model_name="gemini-1.5-flash")
+        # Generate Content
         prompt = """
-        You are a Chef Assistant. Listen to this audio.
-        1. Identify the name of the dish.
-        2. Extract a shopping list of ingredients.
-        3. If measurements are missing, ESTIMATE them (e.g., "1 onion", "2 tbsp oil").
-        4. Group them by aisle (Produce, Dairy, Spices).
+        Listen to this cooking video.
+        1. Extract the dish name.
+        2. Create a shopping list of ingredients.
+        3. If measurements are missing, estimate them (e.g., '1 cup').
+        4. Categorize by aisle (Produce, Dairy, etc).
         """
-        response = model.generate_content([video_file, prompt])
+        
+        response = client.models.generate_content(
+            model="gemini-2.0-flash", 
+            contents=[file_upload, prompt]
+        )
         return response.text
     except Exception as e:
-        return f"Error: {e}"
+        return f"AI Error: {e}"
 
-# 3. The Interface
+# 3. UI
 st.title("🛒 ReelToGrocery")
-st.write("Paste a TikTok, Instagram Reel, or YouTube Short link:")
+st.markdown("Paste a YouTube Short link (e.g., https://www.youtube.com/shorts/...)")
 
-video_url = st.text_input("🔗 Video Link")
+video_url = st.text_input("Video Link:")
 
-if st.button("📝 Generate Shopping List"):
+if st.button("Generate List"):
     if video_url:
-        with st.status("👩‍🍳 Chef is working...", expanded=True) as status:
-            st.write("Downloading audio...")
+        with st.spinner("Downloading audio... (This takes 10s)"):
             audio_file = download_audio(video_url)
             
-            if audio_file:
-                st.write("Listening to recipe...")
+        if audio_file:
+            with st.spinner("AI is analyzing the recipe..."):
                 result = analyze_with_gemini(audio_file)
-                status.update(label="Done!", state="complete", expanded=False)
-                
-                st.markdown("### Your Shopping List")
+                st.markdown("### 📝 Shopping List")
                 st.markdown(result)
                 
-                # --- MONETIZATION BUTTON ---
-                amazon_link = "https://www.amazon.com/fresh" # Replace with your Affiliate Link later
-                st.markdown(f"""
-                    <a href="{amazon_link}" target="_blank">
-                        <button style="width:100%; background-color:#FF9900; color:white; padding:15px; border:none; border-radius:10px; font-size:18px; font-weight:bold; cursor:pointer;">
-                            🛒 Add All to Amazon Cart
-                        </button>
-                    </a>
+                # Affiliate Link
+                st.markdown("""
+                <a href="https://www.amazon.com/fresh" target="_blank">
+                    <button style="background-color:#FF9900; color:white; padding:10px 20px; border:none; border-radius:5px; font-weight:bold;">
+                        👉 Order on Amazon Fresh
+                    </button>
+                </a>
                 """, unsafe_allow_html=True)
                 
-            else:
-
-                st.error("Could not download video. Make sure the link is public!")
+                # Cleanup
+                if os.path.exists(audio_file):
+                    os.remove(audio_file)
