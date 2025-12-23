@@ -1,5 +1,4 @@
 streamlit
 yt-dlp>=2025.01.26
-youtube-transcript-api
 google-genai
 ffmpeg-python
