@@ -4,18 +4,18 @@ from google import genai
 from youtube_transcript_api import YouTubeTranscriptApi
 import os
 import time
-import re
 
-# 1. Setup
+# --- 1. SETUP & CONFIGURATION ---
 st.set_page_config(page_title="ReelToGrocery", layout="centered")
 
+# Initialize Gemini Client (New 2.0 SDK)
 if "GEMINI_API_KEY" in st.secrets:
     client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
 else:
-    st.error("Missing GEMINI_API_KEY in Secrets.")
+    st.error("🚨 Error: Missing GEMINI_API_KEY in Streamlit Secrets.")
     st.stop()
 
-# --- HELPER FUNCTIONS ---
+# --- 2. HELPER FUNCTIONS ---
 
 def get_video_id(url):
     """Extracts Video ID from various YouTube URL formats."""
@@ -29,20 +29,38 @@ def get_video_id(url):
     return video_id
 
 def get_youtube_transcript(url):
-    """Gets the text transcript directly (No download needed)."""
+    """
+    The 'Robocop' Method: 
+    Hunts down ANY text attached to the video (Manual, Auto-generated, or Translated).
+    """
     try:
         video_id = get_video_id(url)
-        transcript = YouTubeTranscriptApi.get_transcript(video_id)
-        # Combine all lines into one string
-        full_text = " ".join([t['text'] for t in transcript])
+        
+        # 1. Get ALL available transcripts
+        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+        
+        # 2. Try to find English first (Manual or Auto)
+        try:
+            transcript = transcript_list.find_transcript(['en', 'en-US', 'en-GB'])
+        except:
+            # 3. If no English, just grab the FIRST one (Auto-generated in any language)
+            transcript = next(iter(transcript_list))
+
+        # 4. Download the text
+        transcript_data = transcript.fetch()
+        
+        # 5. Combine into one string
+        full_text = " ".join([t['text'] for t in transcript_data])
         return full_text
+
     except Exception as e:
-        # Fallback if no transcript exists
+        print(f"Transcript Error: {e}") # Log for debugging
         return None
 
 def download_tiktok_audio(url):
-    """Downloads audio for TikTok/Instagram (Non-YouTube)."""
+    """Downloads audio for TikTok/Instagram (Non-YouTube) with Anti-Bot headers."""
     output_filename = "temp_audio"
+    # Clean up old files
     if os.path.exists(f"{output_filename}.mp3"):
         os.remove(f"{output_filename}.mp3")
     
@@ -56,7 +74,9 @@ def download_tiktok_audio(url):
                 'preferredquality': '192',
             }],
             'quiet': True,
-            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+            'no_warnings': True,
+            # Trick to look like a real browser
+            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
@@ -65,7 +85,7 @@ def download_tiktok_audio(url):
         return None
 
 def ai_process(content, is_audio=False):
-    """Sends Text or Audio to Gemini."""
+    """Sends Text or Audio to Gemini 2.0 Flash."""
     try:
         prompt = """
         You are a Chef Assistant. 
@@ -98,49 +118,55 @@ def ai_process(content, is_audio=False):
     except Exception as e:
         return f"AI Error: {e}"
 
-# --- MAIN UI ---
+# --- 3. MAIN APP INTERFACE ---
 st.title("🛒 ReelToGrocery")
 st.markdown("Paste a YouTube Short, TikTok, or Reel link:")
 
 url = st.text_input("🔗 Video Link")
+st.write("OR")
+manual_text = st.text_area("Paste recipe text manually (if video has no captions):")
 
 if st.button("Generate List"):
-    if url:
-        result = None
-        
-        # STRATEGY 1: CHECK IF YOUTUBE (Use Text - Unblockable)
+    result = None
+    
+    # CASE A: USER PASTED TEXT
+    if manual_text:
+        with st.spinner("Processing manual text..."):
+             result = ai_process(manual_text, is_audio=False)
+             
+    # CASE B: USER PROVIDED A URL
+    elif url:
+        # STRATEGY 1: YOUTUBE (Text Only - Fast & Unblockable)
         if "youtube.com" in url or "youtu.be" in url:
-            with st.status("Reading YouTube Transcript...", expanded=True):
+            with st.status("Fetching YouTube Transcript...", expanded=True):
                 transcript_text = get_youtube_transcript(url)
                 
                 if transcript_text:
-                    st.write("Transcript found! Analyzing text...")
+                    st.write("✅ Transcript found!")
                     result = ai_process(transcript_text, is_audio=False)
                 else:
-                    st.error("No transcript found for this video. (Creator didn't enable captions).")
+                    st.error("❌ No text found. Please copy the video description and paste it in the box above!")
         
-        # STRATEGY 2: TIKTOK/OTHER (Use Audio Download)
+        # STRATEGY 2: TIKTOK (Audio Download)
         else:
             with st.status("Downloading Audio...", expanded=True):
                 audio_file = download_tiktok_audio(url)
-                
                 if audio_file:
-                    st.write("Listening to audio...")
+                    st.write("✅ Audio downloaded!")
                     result = ai_process(audio_file, is_audio=True)
-                    os.remove(audio_file) # Clean up
+                    os.remove(audio_file)
                 else:
-                    st.error("Could not download video. Link might be private or blocked.")
+                    st.error("❌ Download blocked. Try a different video.")
 
-        # DISPLAY RESULT
-        if result:
-            st.markdown("### 📝 Shopping List")
-            st.markdown(result)
-            
-            # Money Button
-            st.markdown("""
-            <a href="https://www.amazon.com/fresh" target="_blank">
-                <button style="width:100%; background-color:#FF9900; color:white; padding:15px; border:none; border-radius:10px; font-weight:bold; cursor:pointer;">
-                    👉 Order on Amazon
-                </button>
-            </a>
-            """, unsafe_allow_html=True)
+    # DISPLAY RESULT
+    if result:
+        st.markdown("---")
+        st.markdown("### 📝 Shopping List")
+        st.markdown(result)
+        st.markdown("""
+        <a href="https://www.amazon.com/fresh" target="_blank">
+            <button style="width:100%; background-color:#FF9900; color:white; padding:15px; border:none; border-radius:10px; font-weight:bold; cursor:pointer;">
+                👉 Order on Amazon
+            </button>
+        </a>
+        """, unsafe_allow_html=True)
