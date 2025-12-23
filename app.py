@@ -16,9 +16,8 @@ else:
     st.stop()
 
 def download_audio(video_url):
-    """Downloads audio from TikTok/Reel to a temp file."""
+    """Downloads audio with anti-bot headers."""
     output_filename = "temp_audio"
-    # Delete old file if exists
     if os.path.exists(f"{output_filename}.mp3"):
         os.remove(f"{output_filename}.mp3")
         
@@ -31,13 +30,20 @@ def download_audio(video_url):
                 'preferredcodec': 'mp3',
                 'preferredquality': '192',
             }],
-            'quiet': True,
-            'noplaylist': True
+            # --- NEW: ANTI-BOT HEADERS ---
+            'quiet': False, # Let us see errors in logs
+            'no_warnings': False,
+            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'referer': 'https://www.google.com/',
         }
+        
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([video_url])
         return f"{output_filename}.mp3"
+        
     except Exception as e:
+        # --- NEW: PRINT THE REAL ERROR ---
+        st.error(f"Detailed Error: {e}") 
         return None
 
 def analyze_with_gemini(audio_path):
@@ -95,4 +101,5 @@ if st.button("📝 Generate Shopping List"):
                 """, unsafe_allow_html=True)
                 
             else:
+
                 st.error("Could not download video. Make sure the link is public!")
