@@ -1,66 +1,66 @@
 import streamlit as st
 import yt_dlp
 from google import genai
-from youtube_transcript_api import YouTubeTranscriptApi
 import os
 import time
+import json
 
-# --- 1. SETUP & CONFIGURATION ---
+# --- CONFIGURATION ---
 st.set_page_config(page_title="ReelToGrocery", layout="centered")
 
-# Initialize Gemini Client (New 2.0 SDK)
 if "GEMINI_API_KEY" in st.secrets:
     client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
 else:
-    st.error("🚨 Error: Missing GEMINI_API_KEY in Streamlit Secrets.")
+    st.error("🚨 Error: Missing GEMINI_API_KEY in Secrets.")
     st.stop()
 
-# --- 2. HELPER FUNCTIONS ---
+# --- HELPER FUNCTIONS ---
 
-def get_video_id(url):
-    """Extracts Video ID from various YouTube URL formats."""
-    video_id = None
-    if "youtu.be" in url:
-        video_id = url.split("/")[-1].split("?")[0]
-    elif "youtube.com/shorts" in url:
-        video_id = url.split("shorts/")[1].split("?")[0]
-    elif "v=" in url:
-        video_id = url.split("v=")[1].split("&")[0]
-    return video_id
+def get_best_transcript_via_ytdlp(url):
+    """
+    NUCLEAR OPTION: Uses yt-dlp to download the subtitle file directly.
+    Bypasses the 'youtube-transcript-api' blocks.
+    """
+    output_filename = "temp_subs"
+    # Clean up old files
+    if os.path.exists(f"{output_filename}.en.vtt"):
+        os.remove(f"{output_filename}.en.vtt")
 
-def get_youtube_transcript(url):
-    """
-    The 'Robocop' Method: 
-    Hunts down ANY text attached to the video (Manual, Auto-generated, or Translated).
-    """
     try:
-        video_id = get_video_id(url)
+        ydl_opts = {
+            'skip_download': True,      # Don't download video (too fast!)
+            'writesubtitles': True,     # Grab manual subs
+            'writeautomaticsub': True,  # Grab auto-generated subs (The Savior)
+            'subtitleslangs': ['en.*','en'], # Get any English
+            'outtmpl': output_filename,
+            'quiet': True,
+            'no_warnings': True,
+            # ANTI-BOT HEADERS (Tricks YouTube)
+            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.212 Safari/537.36',
+        }
         
-        # 1. Get ALL available transcripts
-        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-        
-        # 2. Try to find English first (Manual or Auto)
-        try:
-            transcript = transcript_list.find_transcript(['en', 'en-US', 'en-GB'])
-        except:
-            # 3. If no English, just grab the FIRST one (Auto-generated in any language)
-            transcript = next(iter(transcript_list))
-
-        # 4. Download the text
-        transcript_data = transcript.fetch()
-        
-        # 5. Combine into one string
-        full_text = " ".join([t['text'] for t in transcript_data])
-        return full_text
-
-    except Exception as e:
-        print(f"Transcript Error: {e}") # Log for debugging
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+            
+        # yt-dlp saves as "temp_subs.en.vtt" usually. Let's find it.
+        for file in os.listdir("."):
+            if file.startswith("temp_subs") and file.endswith(".vtt"):
+                # Read the file
+                with open(file, "r", encoding="utf-8") as f:
+                    content = f.read()
+                # Clean up (Delete file)
+                os.remove(file)
+                return content
+                
         return None
 
-def download_tiktok_audio(url):
-    """Downloads audio for TikTok/Instagram (Non-YouTube) with Anti-Bot headers."""
+    except Exception as e:
+        print(f"Transcript Error: {e}")
+        return None
+
+def download_audio(url):
+    """Fallback: Downloads audio if text fails."""
     output_filename = "temp_audio"
-    # Clean up old files
     if os.path.exists(f"{output_filename}.mp3"):
         os.remove(f"{output_filename}.mp3")
     
@@ -74,9 +74,7 @@ def download_tiktok_audio(url):
                 'preferredquality': '192',
             }],
             'quiet': True,
-            'no_warnings': True,
-            # Trick to look like a real browser
-            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
@@ -85,7 +83,7 @@ def download_tiktok_audio(url):
         return None
 
 def ai_process(content, is_audio=False):
-    """Sends Text or Audio to Gemini 2.0 Flash."""
+    """Sends content to Gemini 2.0."""
     try:
         prompt = """
         You are a Chef Assistant. 
@@ -97,7 +95,6 @@ def ai_process(content, is_audio=False):
         """
         
         if is_audio:
-            # Upload file for Gemini to listen
             file_upload = client.files.upload(path=content)
             while file_upload.state.name == "PROCESSING":
                 time.sleep(1)
@@ -108,7 +105,7 @@ def ai_process(content, is_audio=False):
                 contents=[file_upload, prompt]
             )
         else:
-            # Just read the text
+            # Clean VTT timestamps if using text (optional, Gemini usually ignores them)
             response = client.models.generate_content(
                 model="gemini-2.0-flash", 
                 contents=[prompt + f"\n\nTRANSCRIPT:\n{content}"]
@@ -118,47 +115,51 @@ def ai_process(content, is_audio=False):
     except Exception as e:
         return f"AI Error: {e}"
 
-# --- 3. MAIN APP INTERFACE ---
+# --- MAIN UI ---
 st.title("🛒 ReelToGrocery")
 st.markdown("Paste a YouTube Short, TikTok, or Reel link:")
 
 url = st.text_input("🔗 Video Link")
-st.write("OR")
-manual_text = st.text_area("Paste recipe text manually (if video has no captions):")
+
+# Manual Fallback Box
+with st.expander("Or paste text manually (if video fails)"):
+    manual_text = st.text_area("Paste description/recipe here:")
 
 if st.button("Generate List"):
     result = None
     
-    # CASE A: USER PASTED TEXT
+    # 1. Manual Text Priority
     if manual_text:
-        with st.spinner("Processing manual text..."):
+        with st.spinner("Processing text..."):
              result = ai_process(manual_text, is_audio=False)
              
-    # CASE B: USER PROVIDED A URL
+    # 2. Video URL Processing
     elif url:
-        # STRATEGY 1: YOUTUBE (Text Only - Fast & Unblockable)
-        if "youtube.com" in url or "youtu.be" in url:
-            with st.status("Fetching YouTube Transcript...", expanded=True):
-                transcript_text = get_youtube_transcript(url)
+        # Step A: Try fetching Text (Fastest)
+        with st.status("Trying to get recipe...", expanded=True) as status:
+            st.write("Attempting to download subtitles...")
+            transcript = get_best_transcript_via_ytdlp(url)
+            
+            if transcript:
+                st.write("✅ Subtitles found!")
+                result = ai_process(transcript, is_audio=False)
+                status.update(label="Success!", state="complete", expanded=False)
+            
+            # Step B: Fallback to Audio (If subtitles blocked)
+            else:
+                st.write("⚠️ No subtitles. Switching to Audio Listen mode...")
+                audio_file = download_audio(url)
                 
-                if transcript_text:
-                    st.write("✅ Transcript found!")
-                    result = ai_process(transcript_text, is_audio=False)
-                else:
-                    st.error("❌ No text found. Please copy the video description and paste it in the box above!")
-        
-        # STRATEGY 2: TIKTOK (Audio Download)
-        else:
-            with st.status("Downloading Audio...", expanded=True):
-                audio_file = download_tiktok_audio(url)
                 if audio_file:
-                    st.write("✅ Audio downloaded!")
+                    st.write("✅ Audio downloaded! Listening...")
                     result = ai_process(audio_file, is_audio=True)
                     os.remove(audio_file)
+                    status.update(label="Success!", state="complete", expanded=False)
                 else:
-                    st.error("❌ Download blocked. Try a different video.")
+                    status.update(label="Failed", state="error", expanded=False)
+                    st.error("❌ Could not access video. It might be private or heavily blocked.")
 
-    # DISPLAY RESULT
+    # 3. Display
     if result:
         st.markdown("---")
         st.markdown("### 📝 Shopping List")
